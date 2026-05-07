@@ -3,6 +3,11 @@ package com.lauriewired;
 import ghidra.framework.plugintool.Plugin;
 import ghidra.framework.plugintool.PluginTool;
 import ghidra.program.model.address.Address;
+import ghidra.program.model.address.AddressFactory;
+import ghidra.program.model.address.AddressSpace;
+import ghidra.program.model.address.AddressSet;
+import ghidra.program.model.listing.Function;
+import ghidra.program.model.listing.Program;
 import ghidra.program.model.address.GlobalNamespace;
 import ghidra.program.model.listing.*;
 import ghidra.program.model.mem.MemoryBlock;
@@ -49,6 +54,7 @@ import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 
 import javax.swing.SwingUtilities;
+
 import java.io.IOException;
 import java.io.OutputStream;
 import java.lang.reflect.InvocationTargetException;
@@ -208,7 +214,10 @@ public class GhidraMCPPlugin extends Plugin {
         });
 
         server.createContext("/list_functions", exchange -> {
-            sendResponse(exchange, listFunctions());
+            Map<String, String> params = parseQueryParams(exchange);
+            String start_address = params.get("start_address");
+            String end_address = params.get("end_address");
+            sendResponse(exchange, listFunctions(start_address, end_address));
         });
 
         server.createContext("/decompile_function", exchange -> {
@@ -763,20 +772,73 @@ public class GhidraMCPPlugin extends Plugin {
     }
 
     /**
-     * List all functions in the database
+     * List functions in the database
      */
-    private String listFunctions() {
+    private String listFunctions(String start_address, String end_address) {
         Program program = getCurrentProgram();
         if (program == null) return "No program loaded";
 
-        StringBuilder result = new StringBuilder();
-        for (Function func : program.getFunctionManager().getFunctions(true)) {
-            result.append(String.format("%s at %s\n", 
-                func.getName(), 
-                func.getEntryPoint()));
+        if (start_address == null || end_address == null) {
+            return "Error: Missing start_address or end_address parameters.";
         }
 
-        return result.toString();
+        try {
+            // 1. Sanitize inputs (strip "0x" or "0X" if present)
+            String cleanStart = start_address.toLowerCase().replace("0x", "");
+            String cleanEnd = end_address.toLowerCase().replace("0x", "");
+
+            // 2. Safely parse as unsigned longs to support 64-bit addresses
+            long startOffset = Long.parseUnsignedLong(cleanStart, 16);
+            long endOffset = Long.parseUnsignedLong(cleanEnd, 16);
+
+            // 3. Convert to Ghidra Address objects using the default address space
+            AddressSpace space = program.getAddressFactory().getDefaultAddressSpace();
+            Address startAddr = space.getAddress(startOffset);
+            Address endAddr = space.getAddress(endOffset);
+
+            // 4. Create an AddressSet for the range
+            AddressSet searchRange = new AddressSet(startAddr, endAddr);
+            StringBuilder result = new StringBuilder();
+
+            int count = 0;
+            int MAX_FUNCTIONS = 50;
+
+            // 5. Iterate over the functions in the range
+            for (Function func : program.getFunctionManager().getFunctions(searchRange, true)) {
+                
+                // If we already collected 50, this is the 51st function.
+                // Use its address as the starting point for the next request.
+                if (count >= MAX_FUNCTIONS) {
+                    String nextStartAddress = Long.toHexString(func.getEntryPoint().getOffset());
+                    
+                    result.append(String.format(
+                        "--- RANGE TOO LARGE: Limit of %d functions reached, please use sparingly to not overflow context ---\n", MAX_FUNCTIONS));
+                    result.append(String.format(
+                        "To see the rest, please make a new request with: start_address: \"%s\"\n", 
+                        nextStartAddress));
+                    break; // Stop iterating
+                }
+
+                // Append the current function
+                result.append(String.format("%s at %s\n", 
+                    func.getName(), 
+                    Long.toHexString(func.getEntryPoint().getOffset())));
+                
+                count++;
+            }
+
+            if (result.length() == 0) {
+                return "No functions found in the specified range.";
+            }
+
+            return result.toString();
+
+        } catch (NumberFormatException e) {
+            return "Error: Invalid address format. Please provide valid hex addresses.";
+        } catch (Exception e) {
+            // Catch any other Ghidra-specific exceptions so the MCP server stays alive
+            return "Error executing listFunctions: " + e.getMessage();
+        }
     }
 
     /**

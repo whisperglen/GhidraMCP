@@ -169,11 +169,11 @@ def get_current_function() -> str:
     return "\n".join(safe_get("get_current_function"))
 
 @mcp.tool()
-def list_functions() -> list:
+def list_functions(start_address: str, end_address: str) -> list:
     """
-    List all functions in the database.
+    List functions in the database from a specific address range.
     """
-    return safe_get("list_functions")
+    return safe_get("list_functions", {"start_address": start_address, "end_address": end_address})
 
 @mcp.tool()
 def decompile_function_by_address(address: str) -> str:
